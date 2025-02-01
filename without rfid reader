@@ -1,0 +1,199 @@
+
+import tkinter as tk
+from tkinter import ttk
+from PIL import Image, ImageTk
+import threading
+import time
+import qrcode
+import subprocess
+import logging
+from gpiozero import Button, LED
+
+# -------------------- Configuration --------------------
+# Define hardware pins (BCM numbering)
+PEDAL_PIN = 6        # Pedal connected between GPIO6 and GND
+BUTTON_PIN = 12      # Push button connected between GPIO12 and GND
+
+GREEN_LED_PIN = 13   # Green LED: system running
+YELLOW_LED_PIN = 19  # Yellow LED: indicates pedal events
+RED_LED_PIN = 26     # Red LED: indicates push button press or errors
+
+# Debounce time in milliseconds
+DEBOUNCE_TIME = 300
+
+# -------------------- Global Variables --------------------
+count = 0  # Global counter for pedal events
+
+# -------------------- Logging Setup --------------------
+LOG_FILE = "/home/pi/pedal_counter_gui.log"
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format='%(asctime)s:%(levelname)s:%(message)s'
+)
+
+# -------------------- Hardware Initialization --------------------
+# Initialize hardware using gpiozero
+pedal = Button(PEDAL_PIN, pull_up=True)
+button = Button(BUTTON_PIN, pull_up=True)
+green_led = LED(GREEN_LED_PIN)
+yellow_led = LED(YELLOW_LED_PIN)
+red_led = LED(RED_LED_PIN)
+
+# Turn on green LED to indicate the system is running
+green_led.on()
+
+# -------------------- QR Code Generation --------------------
+def generate_qr_code(data):
+    """
+    Generate a QR code image from the provided data.
+    Returns a PIL Image object.
+    """
+    try:
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(data)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        return img
+    except Exception as e:
+        logging.error("QR code generation error: " + str(e))
+        red_led.blink(on_time=1, off_time=1, n=2)
+        return None
+
+# -------------------- GUI Class --------------------
+class PedalCounterApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Green Smart Pedal System")
+        self.root.geometry("1280x720")
+        self.root.configure(bg="black")  # Set window background to black
+        self.create_widgets()
+
+    def create_widgets(self):
+        # --- Add Logo Above the Title ---
+        try:
+            self.logo_img = Image.open("qstss.png")
+            # Optionally, resize the logo if needed; here we set it to 100x100 pixels.
+            self.logo_img = self.logo_img.resize((500, 120 ))
+            self.logo_photo = ImageTk.PhotoImage(self.logo_img)
+            self.logo_label = ttk.Label(self.root, image=self.logo_photo, background="black")
+            self.logo_label.pack(pady=10)
+        except Exception as e:
+            logging.error("Error loading logo image: " + str(e))
+            # If logo fails to load, you can skip displaying it.
+        
+        # Create a style for ttk widgets with black background and white bold text
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TLabel", background="black", foreground="white", font=("Helvetica", 20, "bold"))
+        style.configure("Title.TLabel", background="black", foreground="white", font=("Helvetica", 30, "bold"))
+        style.configure("TButton", background="black", foreground="white", font=("Helvetica", 20, "bold"))
+        
+        # Project Title
+        self.title_label = ttk.Label(self.root, text="Green Smart Pedal System", style="Title.TLabel")
+        self.title_label.pack(pady=10)
+        
+        # Count Display
+        self.count_label = ttk.Label(self.root, text="Points: 0", style="TLabel")
+        self.count_label.pack(pady=20)
+        
+        # Button to manually generate QR code (optional)
+        self.qr_button = ttk.Button(self.root, text="Generate QRCODE", command=self.manual_generate_qr)
+        self.qr_button.pack(pady=0)
+        
+        # Label to display status messages
+        self.status_label = ttk.Label(self.root, text="", style="TLabel")
+        self.status_label.pack(pady=5)
+        
+        # Label to display the QR code image
+        self.qr_label = ttk.Label(self.root, background="black")
+        self.qr_label.pack(pady=5)
+
+    def update_count_label(self, new_count):
+        self.count_label.config(text=f"Count: {new_count}")
+
+    def update_qr_image(self, pil_image):
+        try:
+            pil_image = pil_image.resize((300, 300))
+            self.qr_photo = ImageTk.PhotoImage(pil_image)
+            self.qr_label.config(image=self.qr_photo)
+        except Exception as e:
+            logging.error("Error updating QR image: " + str(e))
+            self.status_label.config(text="Error displaying QR code", foreground="red")
+
+    def update_status(self, message, color="white"):
+        self.status_label.config(text=message, foreground=color)
+
+    def manual_generate_qr(self):
+        global count
+        data = f"Keep Going ...Your Point is: {count}"
+        img = generate_qr_code(data)
+        if img:
+            self.update_qr_image(img)
+            red_led.blink(on_time=1, off_time=1, n=1)
+            self.update_status("QR code generated", "white")
+        else:
+            self.update_status("QR code generation failed", "red")
+
+# -------------------- Hardware Callback Functions --------------------
+def pedal_callback():
+    """
+    Callback function for pedal press.
+    Increments the count, flashes the yellow LED, and updates the GUI.
+    """
+    global count
+    count += 1
+    print(f"Pedal pressed. Count: {count}")
+    logging.info(f"Pedal pressed. Count: {count}")
+    yellow_led.blink(on_time=0.5, off_time=0.5, n=1)
+    # Update GUI count label (thread-safe)
+    app.root.after(0, app.update_count_label, count)
+
+def button_callback():
+    """
+    Callback function for push button press.
+    Flashes the red LED, generates a QR code for the current count, updates the GUI,
+    and prints/logs the current count.
+    """
+    global count
+    print("Push button pressed!")
+    logging.info("Push button pressed!")
+    red_led.blink(on_time=1, off_time=1, n=1)
+    data = f"Keep Going ...Your Point is: {count} - You Can Redeem These Points Now"
+    img = generate_qr_code(data)
+    if img:
+        app.root.after(0, app.update_qr_image, img)
+        app.root.after(0, app.update_status, f"QR code generated for Points: {count}", "white")
+    else:
+        app.root.after(0, app.update_status, "QR code generation failed", "red")
+    print(f"Current count is {count}")
+    logging.info(f"Current count is {count}")
+
+# -------------------- Assign Hardware Callbacks --------------------
+pedal.when_pressed = pedal_callback
+button.when_pressed = button_callback
+
+# -------------------- Main Program --------------------
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = PedalCounterApp(root)
+    
+    logging.info("Pedal Counter GUI Application started.")
+    print("Pedal Counter System running (Green LED is ON).")
+    print(" - Press the pedal (GPIO6) to increment the count (Yellow LED flashes).")
+    print(" - Press the push button (GPIO12) to generate and display a QR code (Red LED flashes).")
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        print("\nExiting application.")
+    finally:
+        green_led.off()
+        yellow_led.off()
+        red_led.off()
+        GPIO.cleanup()
+
